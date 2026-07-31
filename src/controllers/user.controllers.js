@@ -5,7 +5,7 @@ import {deleteFromCloudinary, uploadCloudinary} from "../utils/cloudinary.js"
 import { ApiResponse } from '../utils/ApiResponse.js';
 import jwt from "jsonwebtoken";
 import fs from "fs";
-import mongoose, { set } from 'mongoose';
+import mongoose, { isValidObjectId } from 'mongoose';
 
 
 const generateAccessAndRefreshToken = async (userId) => {
@@ -41,22 +41,23 @@ const registerUser = asyncHandler( async(req, res) => {
         const avatarLocalPath = req.files?.avatar?.[0]?.path;
         const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
         
-        if(!avatarLocalPath){
-            throw new ApiError(400, "avatar image is required")
+        let avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName || username)}&background=ae7aff&color=fff`;
+        if (avatarLocalPath) {
+            const avatar = await uploadCloudinary(avatarLocalPath);
+            if (avatar?.url) avatarUrl = avatar.url;
         }
         
-        const avatar = await uploadCloudinary(avatarLocalPath)
-        const coverImage = await uploadCloudinary(coverImageLocalPath)
-        
-        if(!avatar){
-            throw new ApiError(400, "avatar image upload failed")
+        let coverImageUrl = "";
+        if (coverImageLocalPath) {
+            const coverImage = await uploadCloudinary(coverImageLocalPath);
+            if (coverImage?.url) coverImageUrl = coverImage.url;
         }
 
         const user = await User.create({
             fullName,
             email,
-            avatar : avatar.url,
-            coverImage : coverImage?.url || "",
+            avatar: avatarUrl,
+            coverImage: coverImageUrl,
             password,
             username: username.toLowerCase()
         })
@@ -119,7 +120,7 @@ const loginUser = asyncHandler(async(req,res)=>{
 
     const options = {
         httpOnly : true,
-        secure : true
+        secure : process.env.NODE_ENV === "production"
     }
 
     return res
@@ -144,7 +145,7 @@ const logoutUser = asyncHandler(async(req,res) => {
 
     const options = {
         httpOnly : true,
-        secure : true
+        secure : process.env.NODE_ENV === "production"
     }
 
     return res.status(200)
@@ -177,7 +178,7 @@ const refreshAccessToken = asyncHandler(async(req, res) => {
 
         const options = {
             httpOnly : true,
-            secure : true
+            secure : process.env.NODE_ENV === "production"
         }
 
         return res.status(200)
@@ -207,7 +208,7 @@ const changePassword = asyncHandler(async(req,res) => {
     }
 
     user.password= newPassword;
-    await user.save({valdidateBeforeSave: false});
+    await user.save({validateBeforeSave: false});
 
     return res.status(200).json(new ApiResponse(200, {}, "password changed successfully"));  
 })
@@ -240,30 +241,41 @@ const updateUserProfile = asyncHandler(async(req, res) => {
         throw new ApiError(400, "at least one field is required to update")
     }
 
+    const updateFields = {}
+    if (fullName) updateFields.fullName = fullName
+    if (username) {
+        const usernameExists = await User.findOne({ username: username.toLowerCase(), _id: { $ne: req.user._id } })
+        if (usernameExists) {
+            throw new ApiError(409, "Username is already taken by another account")
+        }
+        updateFields.username = username.toLowerCase()
+    }
+    if (email) {
+        const emailExists = await User.findOne({ email: email.toLowerCase(), _id: { $ne: req.user._id } })
+        if (emailExists) {
+            throw new ApiError(409, "Email is already in use by another account")
+        }
+        updateFields.email = email.toLowerCase()
+    }
+
     const user = await User.findByIdAndUpdate(
         req.user._id,
-        {
-            $set : {
-                fullName,
-                username,
-                email
-            }
-        },
-        {new : true}
-        
+        { $set: updateFields },
+        { new: true }
     ).select("-password -refreshToken")
+
     return res.status(200).json(new ApiResponse(200, {user}, "user profile updated successfully"));
 })
 
 const updateUserAvatar= asyncHandler(async(req, res) => {
     const avatarLocalPath = req.file?.path;
     if(!avatarLocalPath) {
-        throw new ApiError(400, {}, "Avatar has been not uploaded")
+        throw new ApiError(400, "Avatar has not been uploaded")
     }
 
     const avatar = await uploadCloudinary(avatarLocalPath)
-    if(!avatar.url){
-        throw new ApiError(400, {}, "error while uploading avatar");
+    if(!avatar || !avatar.url){
+        throw new ApiError(400, "error while uploading avatar");
     }
     const user = await User.findByIdAndUpdate(
         req.user._id,
@@ -282,7 +294,7 @@ const updateUserAvatar= asyncHandler(async(req, res) => {
             await deleteFromCloudinary(publicId);
         }
         catch(error){
-            throw new ApiError(500, "error while deleting old avatar");
+            console.error("Error deleting old avatar:", error);
         }
     }
     
@@ -292,12 +304,12 @@ const updateUserAvatar= asyncHandler(async(req, res) => {
 const updateUserCoverImage= asyncHandler(async(req, res) => {
     const coverImageLocalPath = req.file?.path;
     if(!coverImageLocalPath) {
-        throw new ApiError(400, {}, "coverImage has been not uploaded")
+        throw new ApiError(400, "coverImage has not been uploaded")
     }
 
-    const coverImage = uploadCloudinary(coverImageLocalPath)
-    if(!coverImage.url){
-        throw new ApiError(400, {}, "error while uploading coverImage");
+    const coverImage = await uploadCloudinary(coverImageLocalPath)
+    if(!coverImage || !coverImage.url){
+        throw new ApiError(400, "error while uploading coverImage");
     }
     const user = await User.findByIdAndUpdate(
         req.user._id,
@@ -313,10 +325,10 @@ const updateUserCoverImage= asyncHandler(async(req, res) => {
     try{
         if(req.user.coverImage){
             const publicId = req.user.coverImage.split("/").pop().split(".")[0];
-            await uploadCloudinary.delete(publicId);
+            await deleteFromCloudinary(publicId);
         }
     } catch(error){
-        throw new ApiError(500, {}, "error while removing old cover image")
+        console.error("Error deleting old cover image:", error);
     }
 
     return res.status(200).json(new ApiResponse(200, {user}, "coverImage uploaded successfully"))
@@ -325,17 +337,19 @@ const updateUserCoverImage= asyncHandler(async(req, res) => {
 const getUserChannelProfile = asyncHandler (async(req,res) => {
     const {username} = req.params;
 
-    if(!username?.trim()){
-        throw new ApiError(400, {}, "username is missing");
+    if(!username?.trim() || username === "undefined" || username === "null"){
+        throw new ApiError(400, "username is missing or invalid");
     }
 
+    const cleanUsername = username.trim().replace(/^@/, "");
     const currentUserId = req.user?._id ? new mongoose.Types.ObjectId(req.user._id) : null;
+    const matchFilter = isValidObjectId(cleanUsername)
+        ? { $or: [{ _id: new mongoose.Types.ObjectId(cleanUsername) }, { username: cleanUsername.toLowerCase() }] }
+        : { username: cleanUsername.toLowerCase() };
 
     const channel = await User.aggregate([
         {
-            $match:{
-                username: username?.toLowerCase()
-            }
+            $match: matchFilter
         },
         {
             $lookup:{
@@ -397,60 +411,32 @@ const getUserChannelProfile = asyncHandler (async(req,res) => {
     )
 })
 
-const getWatchHistory = asyncHandler(async(req,res) => {
-    const user = await User.aggregate([
-        {
-            $match:{
-                _id: new mongoose.Types.ObjectId(req.user._id)
-            }
-        },
-        {
-            $lookup:{
-                from: "videos",
-                localField: "watchHistory",
-                foreignField:"_id",
-                as:"watchHistory",
-                pipeline:[
-                    {
-                        $lookup:{
-                            from:"users",
-                            localField:"videoOwner",
-                            foreignField:"_id",
-                            as:"owner",
-                            pipeline:[
-                                {
-                                    $project:{
-                                        fullName: 1,
-                                        username: 1,
-                                        avatar: 1
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    {
-                        $addFields:{
-                            owner:{
-                                $first: "$owner"
-                            }
-                        }
-                    }
-                ]
-            }
+const getWatchHistory = asyncHandler(async (req, res) => {
+    const user = await User.findById(req.user._id).populate({
+        path: "watchHistory",
+        populate: {
+            path: "owner",
+            select: "username fullName avatar"
         }
-    ])
-    if (!user?.length) {
-        throw new ApiError(404, "User not found");
+    })
+
+    if (!user) {
+        throw new ApiError(404, "User not found")
     }
 
-    const watchHistory = user[0]?.watchHistory || [];
+    const history = (user.watchHistory || []).filter(Boolean).reverse()
 
     return res
-    .status(200)
-    .json(
-        new ApiResponse(200, watchHistory, "watchHistory fetched successfully")
-    )
+        .status(200)
+        .json(new ApiResponse(200, history, "Watch history fetched successfully"))
 })
+
+const clearWatchHistory = asyncHandler(async (req, res) => {
+    await User.findByIdAndUpdate(req.user._id, {
+        $set: { watchHistory: [] }
+    });
+    return res.status(200).json(new ApiResponse(200, [], "Watch history cleared successfully"));
+});
 
 export {
     registerUser, 
@@ -465,5 +451,6 @@ export {
     updateUserAvatar, 
     updateUserCoverImage,
     getUserChannelProfile,
-    getWatchHistory
-};
+    getWatchHistory,
+    clearWatchHistory
+};
