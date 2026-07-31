@@ -25,6 +25,7 @@ import playlistRouter from "./routes/playlist.routes.js";
 import likeRouter from "./routes/like.routes.js";
 import commentRouter from "./routes/comment.routes.js";
 import dashboardRouter from "./routes/dashboard.routes.js";
+import ssrRouter from "./routes/ssr.routes.js";
 
 // --- Route Declarations ---
 app.use("/api/v1/users", userRouter);
@@ -35,6 +36,10 @@ app.use("/api/v1/playlist", playlistRouter);
 app.use("/api/v1/likes", likeRouter);
 app.use("/api/v1/comments", commentRouter);
 app.use("/api/v1/dashboard", dashboardRouter);
+
+// --- Server-Side Page Routes ---
+app.use("/", ssrRouter);
+
 
 // Global Error Handler Middleware
 app.use((err, req, res, next) => {
