@@ -103,14 +103,16 @@ const getVideoById = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invalid video ID")
     }
 
-    const video = await Video.findById(videoId).populate("owner", "username fullName avatar")
+    // Increment views atomically by 1
+    const video = await Video.findByIdAndUpdate(
+        videoId,
+        { $inc: { views: 1 } },
+        { new: true }
+    ).populate("owner", "username fullName avatar")
+
     if (!video) {
         throw new ApiError(404, "Video not found")
     }
-
-    // Increment views and push to watch history atomically
-    video.views = (video.views || 0) + 1
-    await video.save({ validateBeforeSave: false })
 
     // Update user's watch history: pull existing entry then push to end (most recent)
     if (req.user?._id) {
@@ -214,10 +216,13 @@ const togglePublishStatus = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Unauthorized to toggle publish status")
     }
 
-    video.isPublished = !video.isPublished
-    await video.save({ validateBeforeSave: false })
+    const updatedVideo = await Video.findByIdAndUpdate(
+        videoId,
+        { $set: { isPublished: !video.isPublished } },
+        { new: true }
+    )
 
-    return res.status(200).json(new ApiResponse(200, video, "Publish status toggled successfully"))
+    return res.status(200).json(new ApiResponse(200, updatedVideo, "Publish status toggled successfully"))
 })
 
 export {
